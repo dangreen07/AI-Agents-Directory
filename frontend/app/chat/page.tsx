@@ -1,7 +1,8 @@
 "use client";
 import { useState, useEffect, useRef } from "react";
-import { FaPaperPlane, FaRobot, FaUser, FaArrowLeft, FaPlus, FaCopy, FaThumbsUp, FaThumbsDown, FaSpinner } from "react-icons/fa6";
+import { FaPaperPlane, FaRobot, FaArrowLeft, FaCopy, FaThumbsUp, FaThumbsDown, FaSpinner } from "react-icons/fa6";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 
 interface Message {
   id: number;
@@ -10,22 +11,33 @@ interface Message {
   timestamp: Date;
 }
 
+interface Agent {
+  id: string;
+  name: string;
+  description: string;
+}
+
 export default function Chat() {
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
   const [isTyping, setIsTyping] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null);
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const searchParams = useSearchParams();
 
   const conversationStarters = [
-    "Help me debug this React component",
-    "Explain machine learning concepts", 
-    "Review my code architecture",
-    "Generate a marketing strategy",
-    "Write technical documentation",
-    "Analyze this data pattern"
+    "Help me solve a math problem",
+    "Read and summarize a PDF document", 
+    "Explain complex calculations step by step",
+    "Analyze data from a document",
+    "Process mathematical equations",
+    "Extract information from files"
   ];
 
   const scrollToBottom = () => {
@@ -39,13 +51,53 @@ export default function Chat() {
     return () => clearTimeout(timer);
   }, [messages, isTyping]);
 
+  // Fetch agents and handle agent selection
+  useEffect(() => {
+    const fetchAgents = async () => {
+      try {
+        const response = await fetch('http://localhost:8000/agents');
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        const agentsData = await response.json();
+        setAgents(agentsData);
+        
+        // Handle agent selection from URL params
+        const agentParam = searchParams.get('agent');
+        if (agentParam) {
+          const agent = agentsData.find((a: Agent) => a.id === agentParam);
+          if (agent) {
+            setSelectedAgent(agent);
+          }
+        }
+      } catch (err) {
+        console.error('Error fetching agents:', err);
+        setError('Failed to connect to backend. Please make sure the server is running.');
+      }
+    };
+
+    fetchAgents();
+  }, [searchParams]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const trimmedInput = input.trim();
     
     if (!trimmedInput || isSubmitting) return;
 
+    // If no agent selected and we have agents, prompt user to select one
+    if (!selectedAgent && agents.length > 0) {
+      setError('Please select an AI agent first.');
+      return;
+    }
+
+    if (!selectedAgent) {
+      setError('No agents available. Please check your connection.');
+      return;
+    }
+
     setIsSubmitting(true);
+    setError(null);
     
     // Add user message
     const userMessage: Message = {
@@ -66,20 +118,87 @@ export default function Chat() {
     setIsTyping(true);
     
     try {
-      // Simulate assistant response with more realistic delay
-      await new Promise(resolve => setTimeout(resolve, 1000 + Math.random() * 2000));
-      
+      // Prepare messages for API
+      const apiMessages = [...messages, userMessage].map(msg => ({
+        role: msg.sender === 'user' ? 'user' : 'assistant',
+        content: msg.content
+      }));
+
+      const response = await fetch(`http://localhost:8000/agents/${selectedAgent.id}/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          messages: apiMessages,
+          agent_id: selectedAgent.id
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      // Handle streaming response
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error('No response body');
+      }
+
       const assistantMessage: Message = {
         id: Date.now() + 1,
-        content: "I'm here to help! This is a demo response showcasing the enhanced chat interface. In a real implementation, this would connect to your AI backend with sophisticated natural language processing capabilities.",
+        content: '',
         sender: 'assistant',
         timestamp: new Date(),
       };
-      
+
       setMessages(prev => [...prev, assistantMessage]);
+      setIsTyping(false); // Stop typing indicator when we start receiving response
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (line.trim() === '') continue;
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6));
+              
+              if (data.chunk) {
+                // Update the assistant message with the new chunk
+                setMessages(prev => 
+                  prev.map(msg => 
+                    msg.id === assistantMessage.id 
+                      ? { ...msg, content: msg.content + data.chunk }
+                      : msg
+                  )
+                );
+              } else if (data.error) {
+                throw new Error(data.error);
+              } else if (data.status === 'completed') {
+                // Streaming completed
+                break;
+              }
+            } catch (parseError) {
+              console.error('Error parsing streaming data:', parseError);
+            }
+          }
+        }
+      }
     } catch (error) {
       console.error('Error sending message:', error);
-      // Handle error case
+      setError(error instanceof Error ? error.message : 'Failed to send message');
+      
+      // Remove the assistant message if there was an error
+      setMessages(prev => prev.filter(msg => msg.sender === 'user' || msg.content.trim() !== ''));
     } finally {
       setIsTyping(false);
       setIsSubmitting(false);
@@ -142,15 +261,44 @@ export default function Chat() {
                 <FaRobot className="text-cyan-400 text-lg sm:text-xl" />
               </div>
               <div className="hidden sm:block">
-                <h2 className="text-lg sm:text-xl font-semibold text-white">AI Assistant</h2>
-                <p className="text-xs sm:text-sm text-slate-400">Online • Ready to help</p>
+                <h2 className="text-lg sm:text-xl font-semibold text-white">
+                  {selectedAgent ? selectedAgent.name : 'AI Assistant'}
+                </h2>
+                <p className="text-xs sm:text-sm text-slate-400">
+                  {selectedAgent ? 'Online • Ready to help' : 'Select an agent to start'}
+                </p>
               </div>
             </div>
             
-            <button className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 transition-all">
-              <FaPlus />
-            </button>
+            {/* Agent Selector */}
+            {agents.length > 0 && (
+              <div className="hidden sm:block">
+                <select
+                  value={selectedAgent?.id || ''}
+                  onChange={(e) => {
+                    const agent = agents.find(a => a.id === e.target.value);
+                    setSelectedAgent(agent || null);
+                    setError(null);
+                  }}
+                  className="bg-slate-800 border border-white/20 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-cyan-400 transition-colors"
+                >
+                  <option value="">Select Agent</option>
+                  {agents.map(agent => (
+                    <option key={agent.id} value={agent.id}>
+                      {agent.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
           </div>
+
+          {/* Error Message */}
+          {error && (
+            <div className="mt-3 p-3 bg-red-500/10 border border-red-500/20 rounded-lg">
+              <p className="text-red-400 text-sm">{error}</p>
+            </div>
+          )}
         </div>
 
         {/* Messages Area - Scrollable */}
@@ -170,54 +318,52 @@ export default function Chat() {
                 </div>
                 <div>
                   <h1 className="text-2xl sm:text-3xl font-bold text-white mb-2 sm:mb-3">
-                    How can I assist you today?
+                    {selectedAgent ? `Chat with ${selectedAgent.name}` : 'How can I assist you today?'}
                   </h1>
                   <p className="text-slate-300 max-w-lg text-sm sm:text-base">
-                    I&apos;m your AI assistant, ready to help with coding, writing, analysis, research, and much more.
-                    What would you like to work on?
+                    {selectedAgent 
+                      ? selectedAgent.description 
+                      : 'Select an AI assistant to get started with specialized help.'
+                    }
                   </p>
                 </div>
               </div>
 
               {/* Conversation Starters */}
-              <div className="w-full max-w-4xl">
-                <h3 className="text-sm font-medium text-slate-400 mb-4 text-center">
-                  Try one of these to get started:
-                </h3>
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                  {conversationStarters.map((starter, index) => (
-                    <button
-                      key={index}
-                      onClick={() => handleStarterClick(starter)}
-                      disabled={isSubmitting}
-                      className="p-3 sm:p-4 glass border border-white/10 hover:border-white/20 rounded-xl text-left transition-all group text-slate-300 hover:text-white disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      <span className="text-sm">{starter}</span>
-                    </button>
-                  ))}
+              {selectedAgent && (
+                <div className="w-full max-w-4xl">
+                  <h3 className="text-sm font-medium text-slate-400 mb-4 text-center">
+                    Try one of these to get started:
+                  </h3>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                    {conversationStarters.map((starter, index) => (
+                      <button
+                        key={index}
+                        onClick={() => handleStarterClick(starter)}
+                        disabled={isSubmitting}
+                        className="p-3 sm:p-4 glass border border-white/10 hover:border-white/20 rounded-xl text-left transition-all group text-slate-300 hover:text-white disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        <span className="text-sm">{starter}</span>
+                      </button>
+                    ))}
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
           ) : (
             <div className="p-4 sm:p-6 space-y-6 sm:space-y-8">
               {messages.map((message) => (
                 <div
                   key={message.id}
-                  className={`flex gap-3 sm:gap-4 ${
+                  className={`flex ${
                     message.sender === 'user' ? 'justify-end' : 'justify-start'
                   }`}
                 >
-                  {message.sender === 'assistant' && (
-                    <div className="flex-shrink-0 bg-gradient-to-r from-purple-600/20 to-cyan-600/20 p-2 rounded-lg h-fit">
-                      <FaRobot className="text-cyan-400 text-sm" />
-                    </div>
-                  )}
-                  
                   <div className="flex flex-col max-w-[85%] sm:max-w-[80%]">
                     <div
                       className={`p-3 sm:p-4 rounded-2xl ${
                         message.sender === 'user'
-                          ? 'bg-gradient-to-r from-purple-600 to-cyan-600 text-white ml-auto'
+                          ? 'bg-gradient-to-r from-purple-600 to-cyan-600 text-white'
                           : 'glass border border-white/10 text-slate-100'
                       }`}
                     >
@@ -251,20 +397,11 @@ export default function Chat() {
                       )}
                     </div>
                   </div>
-
-                  {message.sender === 'user' && (
-                    <div className="flex-shrink-0 bg-gradient-to-r from-purple-600 to-cyan-600 p-2 rounded-lg h-fit">
-                      <FaUser className="text-white text-sm" />
-                    </div>
-                  )}
                 </div>
               ))}
               
               {isTyping && (
-                <div className="flex gap-3 sm:gap-4 justify-start">
-                  <div className="flex-shrink-0 bg-gradient-to-r from-purple-600/20 to-cyan-600/20 p-2 rounded-lg h-fit">
-                    <FaRobot className="text-cyan-400 text-sm" />
-                  </div>
+                <div className="flex justify-start">
                   <div className="glass border border-white/10 p-3 sm:p-4 rounded-2xl">
                     <div className="flex items-center gap-1">
                       <div className="w-2 h-2 bg-slate-400 rounded-full animate-bounce"></div>
@@ -290,8 +427,8 @@ export default function Chat() {
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
                   onKeyDown={handleKeyDown}
-                  placeholder="Type your message..."
-                  disabled={isSubmitting}
+                  placeholder={selectedAgent ? "Type your message..." : "Select an agent first..."}
+                  disabled={isSubmitting || !selectedAgent}
                   className="w-full bg-transparent text-white placeholder-slate-400 outline-none resize-none py-2 text-sm leading-relaxed min-h-[24px] max-h-[120px] disabled:opacity-50"
                   rows={1}
                   style={{ height: '44px' }}
@@ -300,9 +437,9 @@ export default function Chat() {
               
               <button 
                 type="submit"
-                disabled={!input.trim() || isSubmitting}
+                disabled={!input.trim() || isSubmitting || !selectedAgent}
                 className={`p-3 rounded-xl transition-all flex-shrink-0 flex items-center justify-center ${
-                  input.trim() && !isSubmitting
+                  input.trim() && !isSubmitting && selectedAgent
                     ? 'bg-gradient-to-r from-purple-600 to-cyan-600 hover:from-purple-700 hover:to-cyan-700 text-white shadow-glow'
                     : 'bg-slate-700 text-slate-400 cursor-not-allowed'
                 }`}

@@ -28,11 +28,5 @@ class CalculatorAgent:
     def get_agent(self):
         return create_react_agent(
             model=self.model,
-            tools=self.tools,
-            prompt=[
-                {
-                    "role": "system",
-                    "content": "You are a calculator. You are given a question and you need to answer it using the tools provided. Make sure to use the correct tools and the correct syntax. You can use the tools in any order you want. You can use the tools multiple times if you need to."
-                }
-            ]
+            tools=self.tools
         )
